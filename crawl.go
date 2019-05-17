@@ -6,17 +6,33 @@ import (
 	"net/http"
 	"github.com/PuerkitoBio/goquery"
 	"log"
+	"github.com/gomodule/redigo/redis"
+	"strings"
+	"net/url"
+	"crypto/tls"
 )
+var rc redis.Conn
+
 
 type Proxy struct {
 	ip string
 	port string
 	proxyType int //1-高匿 2-匿名 3-普通
 	connectType int //1-http 2-https 3-socks
-
 }
 
-var chanProxy = make(chan Proxy, 10)
+func (p *Proxy) proxyToStr() string{
+	return p.ip + "|" + p.port + "|" + strconv.Itoa(p.proxyType) + "|" + strconv.Itoa(p.connectType)
+}
+
+func strToProxy(s string) Proxy {
+	l := strings.Split(s, "|")
+	proxyType, _  := strconv.Atoi(l[2])
+	connectType, _  := strconv.Atoi(l[3])
+	return Proxy{l[0], l[1], proxyType, connectType}
+}
+
+var chanProxy = make(chan Proxy)
 
 func Crawl(){
 
@@ -24,9 +40,28 @@ func Crawl(){
 
 func crawlXici(){
 	var waitSync sync.WaitGroup
-	client := &http.Client{}
-
-	for i := 1; i < 2; i++ {
+	var client *http.Client
+	px, err := getRandomProxy()
+	if err == nil {
+		sc := ""
+		if px.connectType == 1 {
+			sc = "http://"
+		}else if px.connectType == 2 {
+			sc = "https://"
+		}
+		proxyUrl, _ := url.Parse(sc + px.ip + ":" + px.port)
+		tr := &http.Transport{
+			Proxy:	http.ProxyURL(proxyUrl),
+			TLSClientConfig:	&tls.Config{InsecureSkipVerify:true},
+		}
+		client = &http.Client{
+			Transport:	tr,
+		}
+		log.Println("[proxyUrl]" , sc + px.ip + ":" + px.port)
+	}else{
+		client = &http.Client{}
+	}
+	for i := 1; i < 5; i++ {
 		waitSync.Add(1)
 		go func(i int) {
 			defer waitSync.Done()
@@ -60,21 +95,41 @@ func crawlXici(){
 					}
 					chanProxy <- Proxy{ip:ip,port:port,proxyType:1,connectType:connectType}
 				})
-
 			}
-
 		}(i)
 	}
 	waitSync.Wait()
+	close(chanProxy)
+}
+
+func saveProxy() {
+	for proxy := range chanProxy {
+		str := proxy.proxyToStr()
+		log.Println("[save]", str)
+		rc.Do("SADD", "proxyList", str)
+	}
+}
+
+func getRandomProxy() (Proxy Proxy, err error){
+	v, err := redis.String(rc.Do("SRANDMEMBER", "proxyList"))
+	if err != nil {
+		return Proxy,err
+	}else {
+		return strToProxy(v), err
+	}
+
 }
 
 func main(){
-	go crawlXici()
-	var proxyList []Proxy
-	for proxy := range chanProxy{
-		proxyList = append(proxyList, proxy)
-		println(proxy.ip)
+	var err error
+	rc, err = redis.Dial("tcp", "127.0.0.1:6379")
+
+	defer rc.Close()
+	if err != nil {
+		log.Panic("redis connection error")
 	}
+	go crawlXici()
+	saveProxy()
 
 
 }
